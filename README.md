@@ -4,7 +4,7 @@ Order Book System Documentation
 Overview
 --------
 
-The Order Book System is a console-based application that simulates an order book commonly used in financial markets for managing buy and sell orders. It allows users to add, modify, and cancel orders while keeping track of the order status and transaction log. The system processes different types of orders (e.g., Market, Good Till Cancel, Fill or Kill) and executes trades when possible based on price matching.
+The Order Book System is a console-based application that simulates an order book commonly used in financial markets for managing buy and sell orders. It allows users to add, modify, and cancel orders while keeping track of the order status and transaction log. The system processes up to 5 kind of orders(Market, Good For Day, Fill Or Kill, Fill And Kill & Good Till Cancel) and executes trades when possible based on price matching.
 
 Core Components
 ---------------
@@ -94,28 +94,25 @@ Concurrency and Thread Safety
 Running the Order Book System
 -----------------------------
 
-- Clone the repo: `https://github.com/engineswap/cpp-orderbook.git`
-- `cd cpp-orderbook`
+- Clone the repo: `git@github.com:CLinnSheng/OrderBook.git`
+- `cd OrderBook`
+  
 You have two options for running the Order Book System:
 
 ### 1\. **User Interaction Mode**
 
 In this mode, the system allows user input for adding, modifying, or canceling orders. It also prepopulates the order book with some initial buy and sell orders for easier testing and visualization.
 
-To run in **User Interaction Mode**:
-
-bash
-
-Copy code
-
-`g++ -o orderbook main.cpp
-./orderbook`
+To run in **User Interaction Mode**:<br>
+1. Compile: `g++ *.cpp -o main`
+2. Run: `./main`
 
 You will be prompted to:
 
 -   Print the order book.
 -   Print the transaction log.
 -   Add, modify, or cancel orders.
+-   Exit
 
 ### 2\. **Test Mode using GoogleTest**
 
@@ -123,14 +120,11 @@ This mode runs predefined test cases using the GoogleTest framework to ensure th
 
 To run in **Test Mode**:
 
--   Ensure you have [GoogleTest](https://github.com/google/googletest) installed.
--   Compile and run the tests:
+Ensure you have [GoogleTest](https://github.com/google/googletest) installed.<br>
 
-    bash
+1. Change directory: cd ./OrderBookTest/
+2. Compile: g++ *.cpp -o test
+3. Run tests: ./test
 
-    Copy code
-
-    `g++ -o orderbook_tests orderbook_tests.cpp -lgtest -lgtest_main -pthread
-    ./orderbook_tests`
 
 This will automatically run all test cases and output the results, allowing you to validate the system's correctness.
