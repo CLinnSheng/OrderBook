@@ -122,6 +122,19 @@ To run in **Test Mode**:
 
 Ensure you have [GoogleTest](https://github.com/google/googletest) installed.<br>
 
+Comment the `prepoulateOrderBook()` function in the constructor of Orderbook, `Orderbook()`
+See ./OrderBook.cpp#L329-330
+
+```
+Orderbook::Orderbook() : ordersPruneThread_{ [this] { PruneGoodForDayOrders(); } }
+{
+	// When an orderbook is created, a new thread is also created.
+	// The purpose of this thread is to wait till the end of day, for every order that is GoodForDay
+	// All the order will be cancel
+	// prepopulateOrderBook();
+}
+```
+
 1. Change directory: cd ./OrderBookTest/
 2. Compile: g++ *.cpp -o test
 3. Run tests: ./test
