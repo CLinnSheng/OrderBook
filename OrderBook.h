@@ -12,6 +12,7 @@
 #include "OrderModify.h"
 #include "OrderbookLevelInfos.h"
 #include "Trade.h"
+#include "TransactionLog.h"
 
 // Core class of the order book system. It maintains the current state of the system
 // Handles adding and cancelling orders, and performs order matching to execute terade when possible
@@ -58,32 +59,45 @@ private:
 
     void PruneGoodForDayOrders();
 
-    void CancelOrders(OrderIds orderIds);
-    void CancelOrderInternal(OrderId orderId);
+    void CancelOrders(OrderIds);
+    void CancelOrderInternal(OrderId);
 
     // Methods relevant for FillOrKill order
-    void OnOrderCancelled(OrderPointer order);
-    void OnOrderAdded(OrderPointer order);
-    void OnOrderMatched(Price price, Quantity quantity, bool isFullyFilled);
-    void UpdateLevelData(Price price, Quantity quantity, LevelData::Action action);
+    void OnOrderCancelled(OrderPointer);
+    void OnOrderAdded(OrderPointer);
+    void OnOrderMatched(Price, Quantity, bool);
+    void UpdateLevelData(Price, Quantity, LevelData::Action);
 
-    bool CanFullyFill(Side side, Price price, Quantity quantity) const;
-    bool CanMatch(Side side, Price price) const;
+    bool CanFullyFill(Side, Price, Quantity) const;
+    bool CanMatch(Side, Price) const;
     Trades MatchOrders();
 
+    TransactionLog TransactionLog_;
 public:
 
     Orderbook();
+    ~Orderbook();
+
+    // Preventing copis and moves to ensure that only one instance of the Orderbookclass exists, making it a singleton
     Orderbook(const Orderbook&) = delete;
     void operator=(const Orderbook&) = delete;
     Orderbook(Orderbook&&) = delete;
     void operator=(Orderbook&&) = delete;
-    ~Orderbook();
 
-    Trades AddOrder(OrderPointer order);
-    void CancelOrder(OrderId orderId);
-    Trades ModifyOrder(OrderModify order);
+    Trades AddOrder(OrderPointer);
+    void CancelOrder(OrderId);
+    Trades ModifyOrder(OrderModify);
 
     std::size_t Size() const;
     OrderbookLevelInfos GetOrderInfos() const;
+
+    void prepopulateOrderBook();
+
+    OrderType getRandomOrderType();
+    Price getRandomPrice(int, int);
+    Quantity getRandomQuantity(int, int);
+    void printVisual() const;
+    std::string getTransactionLog() const;
+
+    static OrderId id_cnt;
 };
