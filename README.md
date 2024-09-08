@@ -122,9 +122,7 @@ To run in **Test Mode**:
 
 Ensure you have [GoogleTest](https://github.com/google/googletest) installed.<br>
 
-Comment the `prepoulateOrderBook()` function in the constructor of Orderbook, `Orderbook()`
-
-See [line 329](https://github.com/CLinnSheng/OrderBook/blob/main/OrderBook.cpp?plain=1#L329)
+Comment [line 329](https://github.com/CLinnSheng/OrderBook/blob/main/OrderBook.cpp?plain=1#L329) in the constructor of Orderbook in OrderBook.cpp file
 
 ```
 Orderbook::Orderbook() : ordersPruneThread_{ [this] { PruneGoodForDayOrders(); } }
