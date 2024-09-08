@@ -2,6 +2,10 @@
 #include <numeric>
 #include <chrono>
 #include <ctime>
+#include <random>
+#include <iostream>
+#include <locale>
+#include <iomanip>
 
 void Orderbook::PruneGoodForDayOrders()
 {
@@ -14,7 +18,7 @@ void Orderbook::PruneGoodForDayOrders()
 		const auto now = system_clock::now(); // Getting the current time
 		const auto now_c = system_clock::to_time_t(now); // Convert the object time to time_t
 		std::tm now_parts;
-		// localtime_r
+		
 		localtime_s(&now_parts, &now_c); // Convert time_t object to tm to enable time to be break down into years, month, etc..
 
 		// only executed if it past 4pm
@@ -61,6 +65,7 @@ void Orderbook::PruneGoodForDayOrders()
 					continue;
 
 				orderIds.push_back(order->GetOrderId());
+				TransactionLog_.addTransaction("GoodForDay order " + std::to_string(order->GetOrderId()) + " removed due to expiration");
 			}
 		}
 
@@ -105,6 +110,7 @@ void Orderbook::CancelOrderInternal(OrderId orderId)
 			bids_.erase(price);
 	}
 
+	TransactionLog_.addTransaction("Order " + std::to_string(orderId) + " cancelled");
 	OnOrderCancelled(order);
 }
 
@@ -141,7 +147,7 @@ void Orderbook::UpdateLevelData(Price price, Quantity quantity, LevelData::Actio
 		data.quantity_ += quantity;
 	}
 
-	// if there is no more orders remaining in this level, just remove it
+	// if there is no more orders remaining in this level, just remove the whole level
 	if (data.count_ == 0)
 		data_.erase(price);
 }
@@ -304,6 +310,14 @@ Trades Orderbook::MatchOrders()
 			CancelOrder(order->GetOrderId());
 	}
 
+	for (const auto& trade : trades) 
+	{
+		TransactionLog_.addTransaction("Trade executed: Bid " + std::to_string(trade.GetBidTrade().orderdId_) +
+			" matched with Ask " + std::to_string(trade.GetAskTrade().orderdId_) +
+			" for " + std::to_string(trade.GetBidTrade().quantity_) +
+			" @ $" + std::to_string(trade.GetBidTrade().price_));
+	}
+
 	return trades;
 }
 
@@ -312,6 +326,7 @@ Orderbook::Orderbook() : ordersPruneThread_{ [this] { PruneGoodForDayOrders(); }
 	// When an orderbook is created, a new thread is also created.
 	// The purpose of this thread is to wait till the end of day, for every order that is GoodForDay
 	// All the order will be cancel
+	prepopulateOrderBook();
 }
 
 Orderbook::~Orderbook()
@@ -348,6 +363,8 @@ Trades Orderbook::AddOrder(OrderPointer order)
 			// it will fill with what left in the book and then become a limit order
 			const auto& [worstAsk, _] = *asks_.rbegin();
 			order->ToGoodTillCancel(worstAsk);
+			// Change the price to the best price which is the lowest people offer because market order
+			// we buying at the cheapest option (Want to buy no matter what according to market rate)
 		}
 
 		// Same goes to sell will lead to the lowest bid price
@@ -364,7 +381,10 @@ Trades Orderbook::AddOrder(OrderPointer order)
 		return { };
 
 	if (order->GetOrderType() == OrderType::FillOrKill && !CanFullyFill(order->GetSide(), order->GetPrice(), order->GetInitialQuantity()))
+	{
+		TransactionLog_.addTransaction("FillOrKill order " + std::to_string(order->GetOrderId()) + " rejected - cannot be fully filled");
 		return { };
+	}
 
 	OrderPointers::iterator iterator; // Pointed to the last order
 
@@ -382,10 +402,9 @@ Trades Orderbook::AddOrder(OrderPointer order)
 	}
 
 	orders_.insert({ order->GetOrderId(), OrderEntry{ order, iterator } });
-
+	TransactionLog_.addTransaction("Order " + std::to_string(order->GetOrderId()) + " added");
 	OnOrderAdded(order);
 
-	
 	// When a new order is added to the orderbook, there's a possibility that it can be immediately matched with existing orders 
 	//on the opposite side. By calling MatchOrders() right after adding the new order, we ensure that any potential trades are executed without delay.
 	return MatchOrders();
@@ -394,7 +413,6 @@ Trades Orderbook::AddOrder(OrderPointer order)
 void Orderbook::CancelOrder(OrderId orderId)
 {
 	std::scoped_lock ordersLock{ ordersMutex_ };
-
 	CancelOrderInternal(orderId);
 }
 
@@ -443,3 +461,109 @@ OrderbookLevelInfos Orderbook::GetOrderInfos() const
 
 	return OrderbookLevelInfos{ bidInfos, askInfos };
 }
+
+void Orderbook::prepopulateOrderBook()
+{
+	// Prepopulate the orderbook with 10 bid & 10 ask
+	for (int i = 0; i < 10; i++)
+	{
+		OrderType OrderType_ = getRandomOrderType();
+		Price Price_ = getRandomPrice(90, 100);
+		Quantity Quantitiy_ = getRandomQuantity(50, 100);
+
+		OrderPointer order = std::make_shared<Order>(OrderType_, id_cnt++, Side::Buy, Price_, Quantitiy_);
+		AddOrder(order);
+	}
+
+	for (int i = 0; i < 10; i++)
+	{
+		OrderType OrderType_ = getRandomOrderType();
+		Price Price_ = getRandomPrice(100, 110);
+		Quantity Quantitiy_ = getRandomQuantity(50, 100);
+
+		OrderPointer order = std::make_shared<Order>(OrderType_, id_cnt++, Side::Sell, Price_, Quantitiy_);
+		AddOrder(order);
+	}
+}
+
+OrderType Orderbook::getRandomOrderType()
+{
+// Prepoulate the orderbook with GoodTillCancel & GoodForDay order
+
+	static std::random_device rd;
+	static std::mt19937 gen(rd());
+	static std::uniform_int_distribution<> dis(0, 1);
+
+	switch (dis(gen))
+	{
+		case 0: return OrderType::GoodTillCancel;
+		case 1: return OrderType::GoodForDay;
+	}
+}
+
+Price Orderbook::getRandomPrice(int min, int max)
+{
+	static std::random_device rd;
+	static std::mt19937 gen(rd());
+	std::uniform_int_distribution<> dis(min, max);
+
+	return static_cast<Price>(dis(gen));
+}
+
+Quantity Orderbook::getRandomQuantity(int min, int max)
+{
+	static std::random_device rd;
+	static std::mt19937 gen(rd());
+	std::uniform_int_distribution<> dis(min, max);
+
+	return static_cast<Quantity>(dis(gen));
+}
+
+void Orderbook::printVisual() const 
+{
+	using namespace std::chrono;
+	const auto now = system_clock::now(); // Getting the current time
+	const auto now_c = system_clock::to_time_t(now); // Convert the object time to time_t
+	std::tm now_parts;
+	localtime_s(&now_parts, &now_c); // Convert time_t object to tm to enable time to be break down into years, month, etc..
+
+	std::cout << now_parts.tm_mday << '/' << now_parts.tm_mon + 1 << '/' << (now_parts.tm_year + 1900) % 2000 << "\t"
+		<< now_parts.tm_hour << ':' << now_parts.tm_min << ':' << now_parts.tm_sec << "\n\n";
+
+	auto infos = GetOrderInfos();
+
+	auto bids = infos.GetBids();
+	auto asks = infos.GetAsks();
+	size_t maxSize = std::max(bids.size(), asks.size());
+
+	std::locale::global(std::locale("en_US.UTF-8"));
+	std::wcout.imbue(std::locale());
+	std::cout << std::left;
+
+	std::cout << "============== BIDS ==============\n";
+	for (const auto& bid : bids)
+	{
+		std::string color = "32";
+		std::cout << "\033[1;" << color << "m" << "$" << std::setw(6) << bid.price_ << std::setw(5) << bid.quantity_ << "\033[0m ";
+
+		for (int i = 0; i < bid.quantity_ / 10; i++)
+			std::wcout << L"█";
+		
+		std::cout << std::endl;
+	}
+
+	std::cout << std::endl;
+	std::cout << "============== ASKS ==============\n";
+	for (const auto& ask : asks)
+	{
+		std::string color = "31";
+		std::cout << "\033[1;" << color << "m" << "$" << std::setw(6) << ask.price_ << std::setw(5) << ask.quantity_ << "\033[0m ";
+
+		for (int i = 0; i < ask.quantity_ / 10; i++)
+			std::wcout << L"█";
+
+		std::cout << std::endl;
+	}
+}
+
+std::string Orderbook::getTransactionLog() const { return TransactionLog_.getFormattedLog(); }
