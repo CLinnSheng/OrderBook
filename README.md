@@ -142,3 +142,10 @@ Orderbook::Orderbook() : ordersPruneThread_{ [this] { PruneGoodForDayOrders(); }
 
 
 This will automatically run all test cases and output the results, allowing you to validate the system's correctness.
+
+Screenshots
+-----------------------------
+![Main](images/mainlogin.png)
+![Print OrderBook](images/PrintOrderBook.png)
+![Print Transaction Log](images/PrintTransactionLog.png)
+![GoogleTest Result](images/googletest.png)
