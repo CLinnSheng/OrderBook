@@ -1,0 +1,1068 @@
+#pragma once
+#include <limits>
+#include "Usings.h"
+
+struct Constants
+{
+    static const Price InvalidPrice = std::numeric_limits<Price>::quiet_NaN();
+};
+
+#pragma once
+#include "Usings.h"
+
+// Represent information about a prive level in the orderbook
+// Price and total quantity available for the specific price point
+
+struct LevelInfo
+{
+    Price price_;
+    Quantity quantity_;
+};
+
+using LevelInfos = std::vector<LevelInfo>;
+
+#pragma once
+
+#include <list>
+#include <exception>
+#include <format>
+#include <stdexcept>
+#include <string>
+
+#include "OrderType.h"
+#include "Side.h"
+#include "Usings.h"
+#include "Constants.h"
+
+// Represents a single order in the order book system
+// Encapsulates the information related to an order like price, quantity, orderId and etc
+class Order
+{
+public:
+    Order(OrderType orderType, OrderId orderId, Side side, Price price, Quantity quantity)
+        : orderType_{ orderType }
+        , orderId_{ orderId }
+        , side_{ side }
+        , price_{ price }
+        , initialQuantity_{ quantity }
+        , remainingQuantity_{ quantity }
+    { }
+
+    // Dealing with Market OrderType where we dont care about the price
+    // Just filled the amount of quantity requested
+    Order(OrderId orderId, Side side, Quantity quantity)
+        : Order(OrderType::Market, orderId, side, Constants::InvalidPrice, quantity)
+    { }
+
+    OrderId GetOrderId() const { return orderId_; }
+    Side GetSide() const { return side_; }
+    Price GetPrice() const { return price_; }
+    OrderType GetOrderType() const { return orderType_; }
+    Quantity GetInitialQuantity() const { return initialQuantity_; }
+    Quantity GetRemainingQuantity() const { return remainingQuantity_; }
+    Quantity GetFilledQuantity() const { return GetInitialQuantity() - GetRemainingQuantity(); }
+    bool IsFilled() const { return GetRemainingQuantity() == 0; }
+
+    // Filling the Order
+    void Fill(Quantity quantity)
+    {
+        // it doesnt make sense when the quantity want to fill exceed the reamining quantity
+        if (quantity > GetRemainingQuantity())
+            throw std::logic_error("Order (" + std::to_string(GetOrderId()) + ") cannot be filled for more than its remaining quantity");
+
+        remainingQuantity_ -= quantity;
+    }
+
+    void ToGoodTillCancel(Price price)
+    {
+        if (GetOrderType() != OrderType::Market)
+            throw std::logic_error("Order (" + std::to_string(GetOrderId()) + ") cannot have its price adjusted, only market orders can.");
+
+        price_ = price;
+        orderType_ = OrderType::GoodTillCancel;
+    }
+
+private:
+    // All the attributes of an order
+    OrderType orderType_;
+    OrderId orderId_;
+    Side side_;
+    Price price_;
+    Quantity initialQuantity_;
+    Quantity remainingQuantity_;
+};
+
+using OrderPointer = std::shared_ptr<Order>;
+using OrderPointers = std::list<OrderPointer>;
+
+#pragma once
+
+#include <map>
+#include <unordered_map>
+#include <thread>
+#include <condition_variable>
+#include <mutex>
+#include <atomic>
+
+#include "Usings.h"
+#include "Order.h"
+#include "OrderModify.h"
+#include "OrderbookLevelInfos.h"
+#include "Trade.h"
+
+// Core class of the order book system. It maintains the current state of the system
+// Handles adding and cancelling orders, and performs order matching to execute terade when possible
+class Orderbook
+{
+    /*
+    2 data structures will be used which is map & unordered_map
+    map is chosen because of it is sorted order which can use for bids and asks price
+    and for easy access (O(1)) based on the orderId
+    */
+
+private:
+
+    struct OrderEntry
+    {
+        OrderPointer order_{ nullptr };
+        OrderPointers::iterator location_; // An iterator to the list of OrderPointer
+    };
+
+    // Store the data of a level (Price level)
+    struct LevelData
+    {
+        Quantity quantity_{ };
+        Quantity count_{ };
+
+        enum class Action
+        {
+            Add,
+            Remove,
+            Match,
+        };
+    };
+
+    std::unordered_map<Price, LevelData> data_;
+    std::map<Price, OrderPointers, std::greater<Price>> bids_; // Descending Order. Key : Price, Value: OrderPointers (List of orderpointer of type "Order")
+    std::map<Price, OrderPointers, std::less<Price>> asks_; // Ascending Order
+    std::unordered_map<OrderId, OrderEntry> orders_; //Key: OrderId, Value: Content of the order
+
+    // Use for GoodForDay
+    mutable std::mutex ordersMutex_;
+    std::thread ordersPruneThread_;
+    std::condition_variable shutdownConditionVariable_;
+    std::atomic<bool> shutdown_{ false };
+
+    void PruneGoodForDayOrders();
+
+    void CancelOrders(OrderIds);
+    void CancelOrderInternal(OrderId);
+
+    // Methods relevant for FillOrKill order
+    void OnOrderCancelled(OrderPointer);
+    void OnOrderAdded(OrderPointer);
+    void OnOrderMatched(Price, Quantity, bool);
+    void UpdateLevelData(Price, Quantity, LevelData::Action);
+
+    bool CanFullyFill(Side, Price, Quantity) const;
+    bool CanMatch(Side, Price) const;
+    Trades MatchOrders();
+
+public:
+
+    Orderbook();
+
+    // Preventing copis and moves to ensure that only one instance of the Orderbookclass exists, making it a singleton
+    Orderbook(const Orderbook&) = delete;
+    void operator=(const Orderbook&) = delete;
+    Orderbook(Orderbook&&) = delete;
+    void operator=(Orderbook&&) = delete;
+
+    ~Orderbook();
+
+    Trades AddOrder(OrderPointer);
+    void CancelOrder(OrderId);
+    Trades ModifyOrder(OrderModify);
+
+    std::size_t Size() const;
+    OrderbookLevelInfos GetOrderInfos() const;
+
+    void prepopulateOrderBook();
+
+    OrderType getRandomOrderType();
+    Price getRandomPrice(int, int);
+    Quantity getRandomQuantity(int, int);
+    void printVisual() const;
+
+    static OrderId id_cnt;
+};
+
+#pragma once
+
+#include "LevelInfo.h"
+
+// Provide a snapshot of the current state of the order book
+// including all the bids and asks
+class OrderbookLevelInfos
+{
+public:
+    OrderbookLevelInfos(const LevelInfos& bids, const LevelInfos& asks)
+        : bids_{ bids }
+        , asks_{ asks }
+    { }
+
+    const LevelInfos& GetBids() const { return bids_; }
+    const LevelInfos& GetAsks() const { return asks_; }
+
+private:
+    LevelInfos bids_;
+    LevelInfos asks_;
+};
+
+#pragma once
+#include "Order.h"
+
+// Storing a single order with multiple data structure in an order book
+class OrderModify
+{
+public:
+    OrderModify(OrderId orderId, Side side, Price price, Quantity quantity)
+        : orderId_{ orderId }
+        , price_{ price }
+        , side_{ side }
+        , quantity_{ quantity }
+    { }
+
+    OrderId GetOrderId() const { return orderId_; }
+    Side GetSide() const { return side_; }
+    Price GetPrice() const { return price_; }
+    Quantity GetQuantity() const { return quantity_; }
+
+    // Converting a given order that is already existed transforming this modify order into a new order
+    OrderPointer ToOrderPointer(OrderType type) const
+    {
+        return std::make_shared<Order>(type, orderId_, side_, price_, quantity_);
+    }
+
+private:
+    OrderId orderId_;
+    Price price_;
+    Side side_;
+    Quantity quantity_;
+
+};
+
+#pragma once
+
+// Enum for oder and sides
+// GoodTillCancel: Remain active in market until it is either full filled or cancel
+// FillAndKill: Execute/fill the order immediately (either partially or fully) or cancel it if no execution
+// FillOrKill: Is diff from FillAndKill, this 1 is only being filled for the required quantity or else dw to fill it
+// Market: Fill the order no matter whats the price is
+// GoodForDay: Works like GoodTillCancel but with time constraint where the order will be remove when reach the set time
+enum class OrderType
+{
+    GoodTillCancel,
+    FillAndKill,
+    FillOrKill,
+    GoodForDay,
+    Market
+};
+
+#pragma once
+
+enum class Side
+{
+    Buy,
+    Sell
+};
+
+#pragma once
+#include "TradeInfo.h"
+
+class Trade
+{
+public:
+    Trade(const TradeInfo& bidTrade, const TradeInfo& askTrade)
+        : bidTrade_{ bidTrade }
+        , askTrade_{ askTrade }
+    {}
+
+    const TradeInfo& GetBidTrade() const { return bidTrade_; }
+    const TradeInfo& GetAskTrade() const { return askTrade_; }
+
+private:
+    TradeInfo bidTrade_;
+    TradeInfo askTrade_;
+};
+
+using Trades = std::vector<Trade>;
+
+#pragma once
+#include "Usings.h"
+
+struct TradeInfo {
+    OrderId orderdId_;
+    Price price_;
+    Quantity quantity_;
+};
+
+#pragma once
+
+#include <vector>
+
+// Just to improve readability
+using Price = std::int32_t;
+using Quantity = std::uint32_t;
+using OrderId = std::uint64_t;
+using OrderIds = std::vector<OrderId>;
+
+enum class ActionType
+{
+    Add,
+    Cancel,
+    Modify,
+};
+
+/*
+Implementation of an Order Book System
+Manage and match any buy and sell orders
+
+Order Book: A data structure is collection of orders partition by buy and sell
+such that buy and sell order is buy order and sell order are match by price time priority
+An order that is the best bid is going to be match first against the sell order thats looking to aggress against the buy side
+Key Component of an Order Book:
+i. Bid side: List of buy orders with the highest bid price at the top
+ii. Ask side:  List of sell orders with the lowest ask price at the top
+iii. Orders: List of order whether it is bid or ask
+iv. Price Level: We call it as levelinfo at here contains the price and the amount of quantity
+
+Features:
+i. Placing an order
+ii. Matching the order: See whether does it tally (at a specific price) with the 1 that is saved in the system
+iii. Cancel Order
+*/
+#include "OrderBook.h"
+#include <iostream>
+#include <iomanip>
+
+
+OrderId Orderbook::id_cnt = 0;
+
+void Login_Screen()
+{
+    std::cout << "===============================\n"
+              << "       ORDER BOOK SYSTEM       \n"
+              << "===============================\n";
+    std::cout << "Welcome to the Order Book System\n";
+
+    std::cout << "\nPlease enter your option:\n";
+    std::cout << "1. Print Orderbook\n"
+              << "2. Add Order\n"
+              << "3. Exit\n";
+    std::cout << "Choice: ";
+}
+
+void clearConsole() 
+{
+    #if defined(_WIN32) || defined(_WIN64)
+        system("cls"); // Windows
+    #else
+        system("clear"); // Unix/Linux/MacOS
+    #endif
+}
+
+void Handle_Add(Orderbook *orderbook)
+{
+    int Input_Side, Input_OrderType, Input_Price, Input_Quantity;
+
+    std::cout << "Enter Side:" << std::endl
+              << "1. Buy" << std::endl
+              << "2. Sell" << std::endl;
+    std::cout << "Selection: ";
+    std::cin >> Input_Side;
+    if (Input_Side < 0 or Input_Side > 2)
+        throw std::logic_error("Unsupport Side");
+
+    std::cout << "\nEnter Order Type:" << std::endl
+              << "1. Good Till Cancel" << std::endl
+              << "2. Fill And Kill" << std::endl
+              << "3. Fill Or Kill" << std::endl
+              << "4. GoodForDay" << std::endl
+              << "5. Market" << std::endl;
+    std::cout << "Selection: ";
+    std::cin >> Input_OrderType;
+    if (Input_OrderType < 0 or Input_OrderType > 5)
+        throw std::logic_error("Unsupport Order Type");
+
+    std::cout << "\nEnter Price: ";
+    std::cin >> Input_Price;
+    if (Input_Price <= 0)
+        throw std::logic_error("Price must be greater than 0");
+
+    std::cout << "\nEnter Quantity: ";
+    std::cin >> Input_Quantity;
+    if (Input_Quantity <= 0)
+        throw std::logic_error("Quantity must be greater than 0");
+
+    orderbook->AddOrder(std::make_shared<Order>(static_cast<OrderType>((int)Input_OrderType - 1), orderbook->id_cnt++, static_cast<Side>((int)Input_Side - 1), static_cast<Price>(Input_Price), static_cast<Quantity>(Input_Quantity)));
+}
+
+void Handle_Modify(Orderbook* orderbook)
+{
+    int Input_OrderId, Input_Side, Input_Price, Input_Quantity;
+
+    std::cout << "Enter OrderId: ";
+    std::cin >> Input_OrderId;
+
+    std::cout << "Enter Side:" << std::endl
+              << "1. Buy" << std::endl
+              << "2. Sell" << std::endl;
+    std::cout << "Selection: ";
+    std::cin >> Input_Side;
+    if (Input_Side < 0 or Input_Side > 2)
+        throw std::logic_error("Unsupport Side");
+
+    std::cout << "\nEnter Price: ";
+    std::cin >> Input_Price;
+    if (Input_Price <= 0)
+        throw std::logic_error("Price must be greater than 0");
+
+    std::cout << "\nEnter Quantity: ";
+    std::cin >> Input_Quantity;
+    if (Input_Quantity <= 0)
+        throw std::logic_error("Quantity must be greater than 0");
+    
+    orderbook->ModifyOrder(OrderModify{ static_cast<OrderId>(Input_OrderId), static_cast<Side>((int)Input_Side - 1), static_cast<Price>(Input_Price), static_cast<Quantity>(Input_Quantity) });
+}
+
+void Handle_Cancel(Orderbook *orderbook)
+{
+    int Input_OrderId;
+
+    std::cout << "Enter OrderId: ";
+    std::cin >> Input_OrderId;
+
+    orderbook->CancelOrder(static_cast<OrderId>(Input_OrderId));
+}
+
+int main() 
+{
+    Orderbook* orderbook = new Orderbook();
+    clearConsole();
+
+    //std::cout << "\n\n" << orderbook.GetOrderInfos().GetAsks().size() << '\t' << orderbook.GetOrderInfos().GetBids().size();
+    /*std::string color = "32";
+   
+    std::cout << "\t\033[1;" << color << "m" << "$" << std::setw(6) << 499 << std::setprecision(2) << 13 << std::setw(5) << 20 << "\033[0m ";
+    
+    std::locale::global(std::locale("en_US.UTF-8"));
+    std::wcout.imbue(std::locale());
+    std::wcout << L"█" << std::endl; */
+
+    Login_Screen();
+    int choice;
+
+    while (true)
+    {
+        std::cin >> choice;
+        clearConsole();
+
+        switch (choice)
+        {
+            case 1:
+                orderbook->printVisual();
+                system("pause");
+                break;
+            case 2:
+                int Input_ActionType;
+                std::cout << "Enter Action:" << std::endl
+                          << "1. Add" << std::endl
+                          << "2. Modify" << std::endl
+                          << "3. Cancel" << std::endl;
+                std::cout << "Selection: ";
+                std::cin >> Input_ActionType;
+                clearConsole();
+
+                if (Input_ActionType == 1)
+                    Handle_Add(orderbook);
+                else if (Input_ActionType == 2)
+                    Handle_Modify(orderbook);
+                else if (Input_ActionType == 3)
+                    Handle_Cancel(orderbook);
+                else
+                    throw std::logic_error("Unsupported Type");
+                
+                break;
+            default:
+                return 0;
+        }
+
+        clearConsole();
+
+        std::cout << "Please enter your option:\n";
+        std::cout << "1. Print Orderbook\n"
+                  << "2. Add Order\n"
+                  << "3. Exit\n";
+        std::cout << "Choice: ";
+    }
+
+    return 0;
+}
+
+#include "OrderBook.h"
+#include <numeric>
+#include <chrono>
+#include <ctime>
+#include <random>
+#include <iostream>
+#include <locale>
+#include <iomanip>
+
+void Orderbook::PruneGoodForDayOrders()
+{
+	using namespace std::chrono;
+	const auto end = hours(21);
+
+	// Thread is spinning at a loop until 4pm to cancel all GoodForDays order
+	while (true)
+	{
+		const auto now = system_clock::now(); // Getting the current time
+		const auto now_c = system_clock::to_time_t(now); // Convert the object time to time_t
+		std::tm now_parts;
+		
+		localtime_s(&now_parts, &now_c); // Convert time_t object to tm to enable time to be break down into years, month, etc..
+
+		// only executed if it past 4pm
+		if (now_parts.tm_hour >= end.count())
+			now_parts.tm_mday += 1; // if it past 4pm add 1 more day to it because the market is closed, prunning the order
+
+
+		// We setting the market closed at 4pm
+		now_parts.tm_hour = end.count();
+		now_parts.tm_min = 0;
+		now_parts.tm_sec = 0;
+
+		// Caculate how much time until 4pm
+		auto next = system_clock::from_time_t(mktime(&now_parts));
+		auto till = next - now + milliseconds(100); // Add 100ms just to make sure we do right after our pruning point in time
+
+		{
+			/*
+			Dont want this thread to alter the state of our data structure at the same time
+			Any time we reference our orders, we need to take tat reference with a lock (protect the data)
+			*/
+			std::unique_lock ordersLock{ ordersMutex_ };
+
+			// If orderbook is shutdown or shutdown before the market close
+			// we straigth return because we cant do anything
+			if (shutdown_.load(std::memory_order_acquire) ||
+				shutdownConditionVariable_.wait_for(ordersLock, till) == std::cv_status::no_timeout)
+				return;
+		}
+
+		// Proceed after reach 4pm
+		OrderIds orderIds;
+
+		{
+			std::scoped_lock ordersLock{ ordersMutex_ };
+
+			// Iterate every our orders we have outstanding
+			// Collect the order Id of GoodForDay order because this method is particularly for this type of order only
+			for (const auto& [_, entry] : orders_)
+			{
+				const auto& [order, __] = entry;
+
+				if (order->GetOrderType() != OrderType::GoodForDay)
+					continue;
+
+				orderIds.push_back(order->GetOrderId());
+			}
+		}
+
+		CancelOrders(orderIds);
+	}
+}
+
+void Orderbook::CancelOrders(OrderIds orderIds)
+{
+	/*
+	Reason to have this extra function just to improve efficiency & prevent overhead
+	as we only need to lock one time regardless the number of order
+	*/
+	std::scoped_lock ordersLock{ ordersMutex_ };
+
+	for (const auto& orderId : orderIds)
+		CancelOrderInternal(orderId);
+}
+
+void Orderbook::CancelOrderInternal(OrderId orderId)
+{
+	if (!orders_.count(orderId))
+		return;
+
+	const auto [order, iterator] = orders_.at(orderId);
+	orders_.erase(orderId);
+
+	if (order->GetSide() == Side::Sell)
+	{
+		auto price = order->GetPrice();
+		auto& orders = asks_.at(price);
+		orders.erase(iterator); // Erasing the particular order for the price and the iterator point to
+		if (orders.empty()) // If there is no more order in this price point
+			asks_.erase(price); // straight delete the the key and value pair in the hash
+	}
+	else
+	{
+		auto price = order->GetPrice();
+		auto& orders = bids_.at(price);
+		orders.erase(iterator);
+		if (orders.empty())
+			bids_.erase(price);
+	}
+
+	OnOrderCancelled(order);
+}
+
+void Orderbook::OnOrderCancelled(OrderPointer order)
+{
+	UpdateLevelData(order->GetPrice(), order->GetRemainingQuantity(), LevelData::Action::Remove);
+}
+
+void Orderbook::OnOrderAdded(OrderPointer order)
+{
+	UpdateLevelData(order->GetPrice(), order->GetInitialQuantity(), LevelData::Action::Add);
+}
+
+void Orderbook::OnOrderMatched(Price price, Quantity quantity, bool isFullyFilled)
+{
+	// If the order is fully filled, we need to remove that order count from our bookkeeping data structure
+	// if not fully filled just dont touch the bookkeeping
+	UpdateLevelData(price, quantity, isFullyFilled ? LevelData::Action::Remove : LevelData::Action::Match);
+}
+
+void Orderbook::UpdateLevelData(Price price, Quantity quantity, LevelData::Action action)
+{
+	auto& data = data_[price];
+
+	// Modify the information of level data accodring to the action
+	// If the action is match we just need to remove the quantity, we dont need to remove the count because the order is still not fully filled
+	data.count_ += action == LevelData::Action::Remove ? -1 : action == LevelData::Action::Add ? 1 : 0;
+	if (action == LevelData::Action::Remove || action == LevelData::Action::Match)
+	{
+		data.quantity_ -= quantity;
+	}
+	else
+	{
+		data.quantity_ += quantity;
+	}
+
+	// if there is no more orders remaining in this level, just remove the whole level
+	if (data.count_ == 0)
+		data_.erase(price);
+}
+
+bool Orderbook::CanFullyFill(Side side, Price price, Quantity quantity) const
+{
+/*
+Basically work the same as CanMatch but this 1 is specifically designed for CanFullyFill or not the match order
+*/
+	if (!CanMatch(side, price))
+		return false;
+
+	std::optional<Price> threshold;
+
+	if (side == Side::Buy)
+	{
+		// Getting the range of asks price for the person [buy price, best ask (cheapest)]
+		const auto [askPrice, _] = *asks_.begin();
+		threshold = askPrice;
+	}
+	else
+	{
+		const auto [bidPrice, _] = *bids_.begin();
+		threshold = bidPrice;
+	}
+
+	for (const auto& [levelPrice, levelData] : data_)
+	{
+		if (threshold.has_value() &&
+			(side == Side::Buy && threshold.value() > levelPrice) ||
+			(side == Side::Sell && threshold.value() < levelPrice))
+			continue;
+
+		if ((side == Side::Buy && levelPrice > price) ||
+			(side == Side::Sell && levelPrice < price))
+			continue;
+
+		// if this level of quantity is enough to fill the order straight return
+		if (quantity <= levelData.quantity_)
+			return true;
+
+		// Keep repeating fill the order if this level of quantity isnt enuf to fully filled
+		quantity -= levelData.quantity_;
+	}
+
+	// Coulnt fully filled
+	return false;
+}
+
+bool Orderbook::CanMatch(Side side, Price price) const
+{
+/*
+This function is to check whether we can match this order in the orderbook or not (eg: Match a buy order to a sell order)
+*/
+	if (side == Side::Buy)
+	{
+		// if no 1 is selling then fail
+		if (asks_.empty())
+			return false;
+
+		// the lowest price that people offer to sell
+		const auto& [bestAsk, _] = *asks_.begin();
+		return price >= bestAsk;
+	}
+
+	else
+	{
+		// Selling
+		// if no 1 is requesting to buy then fail
+		if (bids_.empty())
+			return false;
+
+		// the highest price people offer to buy
+		const auto& [bestBid, _] = *bids_.begin();
+		return price <= bestBid;
+	}
+}
+
+Trades Orderbook::MatchOrders()
+{
+	// See whether the bestBid and bestAsk can match or not
+	Trades trades;
+	trades.reserve(orders_.size());
+
+	while (true)
+	{
+		if (bids_.empty() || asks_.empty())
+			break;
+
+		auto& [bidPrice, bids] = *bids_.begin();  // Getting the highest price people offer to buy
+		auto& [askPrice, asks] = *asks_.begin();  // Getting the lowest price people offer to sell
+
+		// asks & bids are a list of Orders (shared_ptr)
+
+		// it doesnt make sense if u want to buy the price higher than the 1 u desired
+		if (bidPrice < askPrice)
+			break;
+
+		while (!bids.empty() && !asks.empty())
+		{
+			auto bid = bids.front();   // The first in queue for the highest price people offer to buy
+			auto ask = asks.front();   // The first in queue for the lowest price people offer to sell
+
+			Quantity quantity = std::min(bid->GetRemainingQuantity(), ask->GetRemainingQuantity());
+
+			bid->Fill(quantity);
+			ask->Fill(quantity);
+
+			// if the order in bid is been filled
+			// we just remove it from the list of orders as well as in bids
+			if (bid->IsFilled())
+			{
+				bids.pop_front();
+				orders_.erase(bid->GetOrderId());
+			}
+
+			// Same goes to ask
+			if (ask->IsFilled())
+			{
+				asks.pop_front();
+				orders_.erase(ask->GetOrderId());
+			}
+
+
+			trades.push_back(Trade{
+				TradeInfo{ bid->GetOrderId(), bid->GetPrice(), quantity },
+				TradeInfo{ ask->GetOrderId(), ask->GetPrice(), quantity }
+				});
+
+			OnOrderMatched(bid->GetPrice(), quantity, bid->IsFilled());
+			OnOrderMatched(ask->GetPrice(), quantity, ask->IsFilled());
+		}
+
+		if (bids.empty())
+		{
+			bids_.erase(bidPrice);
+			data_.erase(bidPrice);
+		}
+
+		if (asks.empty())
+		{
+			asks_.erase(askPrice);
+			data_.erase(askPrice);
+		}
+	}
+
+	if (!bids_.empty())
+	{
+		auto& [_, bids] = *bids_.begin();
+		auto& order = bids.front();
+		if (order->GetOrderType() == OrderType::FillAndKill)
+			CancelOrder(order->GetOrderId());
+	}
+
+	if (!asks_.empty())
+	{
+		auto& [_, asks] = *asks_.begin();
+		auto& order = asks.front();
+		if (order->GetOrderType() == OrderType::FillAndKill)
+			CancelOrder(order->GetOrderId());
+	}
+
+	return trades;
+}
+
+Orderbook::Orderbook() : ordersPruneThread_{ [this] { PruneGoodForDayOrders(); } }
+{
+	// When an orderbook is created, a new thread is also created.
+	// The purpose of this thread is to wait till the end of day, for every order that is GoodForDay
+	// All the order will be cancel
+	prepopulateOrderBook();
+}
+
+Orderbook::~Orderbook()
+{
+	shutdown_.store(true, std::memory_order_release);
+	shutdownConditionVariable_.notify_one();
+	ordersPruneThread_.join();
+}
+
+Trades Orderbook::AddOrder(OrderPointer order)
+{
+	/*
+	This function add order to the orderbook
+	First of all we have to check what kind of order type is:
+	a) Market
+	- Looking to Buy, only valid theres someone selling. If there arent any sell, we just return empty Trade (nothing happen) --> Order is cancelled
+	- If there exists some1 asking to sell, theoretically the worst asks will be executed on
+	- Then pass on to good till cancel order
+	*/
+	std::scoped_lock ordersLock{ ordersMutex_ };
+
+	// if contain this orderId already, we have to reject it because each order has an unique orderId
+	if (orders_.count(order->GetOrderId()))
+		return { };
+
+	// Deals with OrderType::Market
+	if (order->GetOrderType() == OrderType::Market)
+	{
+		// Buying at market rate will lead to buying the highest ask price
+		if (order->GetSide() == Side::Buy && !asks_.empty())
+		{
+			// Then proceed to handling GoodTillCancel Order type because if there is more qty in the book than the 1 u requested
+			// your Market order will be filled fully and then remove from the oder book or else
+			// it will fill with what left in the book and then become a limit order
+			const auto& [worstAsk, _] = *asks_.rbegin();
+			order->ToGoodTillCancel(worstAsk);
+			// Change the price to the best price which is the lowest people offer because market order
+			// we buying at the cheapest option (Want to buy no matter what according to market rate)
+		}
+
+		// Same goes to sell will lead to the lowest bid price
+		else if (order->GetSide() == Side::Sell && !bids_.empty())
+		{
+			const auto& [worstBid, _] = *bids_.rbegin();
+			order->ToGoodTillCancel(worstBid);
+		}
+		else
+			return { };
+	}
+
+	if (order->GetOrderType() == OrderType::FillAndKill && !CanMatch(order->GetSide(), order->GetPrice()))
+		return { };
+
+	if (order->GetOrderType() == OrderType::FillOrKill && !CanFullyFill(order->GetSide(), order->GetPrice(), order->GetInitialQuantity()))
+		return { };
+
+	OrderPointers::iterator iterator; // Pointed to the last order
+
+	if (order->GetSide() == Side::Buy)
+	{
+		auto& orders = bids_[order->GetPrice()];
+		orders.push_back(order);
+		iterator = std::prev(orders.end());
+	}
+	else
+	{
+		auto& orders = asks_[order->GetPrice()];
+		orders.push_back(order);
+		iterator = std::prev(orders.end());
+	}
+
+	orders_.insert({ order->GetOrderId(), OrderEntry{ order, iterator } });
+
+	OnOrderAdded(order);
+
+	
+	// When a new order is added to the orderbook, there's a possibility that it can be immediately matched with existing orders 
+	//on the opposite side. By calling MatchOrders() right after adding the new order, we ensure that any potential trades are executed without delay.
+	return MatchOrders();
+}
+
+void Orderbook::CancelOrder(OrderId orderId)
+{
+	std::scoped_lock ordersLock{ ordersMutex_ };
+
+	CancelOrderInternal(orderId);
+}
+
+Trades Orderbook::ModifyOrder(OrderModify order)
+{
+	OrderType orderType;
+
+	{
+		std::scoped_lock ordersLock{ ordersMutex_ };
+
+		if (!orders_.count(order.GetOrderId()))
+			return { };
+
+		const auto& [existingOrder, _] = orders_.at(order.GetOrderId());
+		orderType = existingOrder->GetOrderType();
+	}
+
+	CancelOrder(order.GetOrderId());
+	return AddOrder(order.ToOrderPointer(orderType));
+}
+
+std::size_t Orderbook::Size() const
+{
+	std::scoped_lock ordersLock{ ordersMutex_ };
+	return orders_.size();
+}
+
+OrderbookLevelInfos Orderbook::GetOrderInfos() const
+{
+	LevelInfos bidInfos, askInfos;
+	bidInfos.reserve(orders_.size());
+	askInfos.reserve(orders_.size());
+
+	auto CreateLevelInfos = [](Price price, const OrderPointers& orders)
+		{
+			return LevelInfo{ price, std::accumulate(orders.begin(), orders.end(), (Quantity)0,
+				[](Quantity runningSum, const OrderPointer& order)
+				{ return runningSum + order->GetRemainingQuantity(); }) };
+		};
+
+	for (const auto& [price, orders] : bids_)
+		bidInfos.push_back(CreateLevelInfos(price, orders));
+
+	for (const auto& [price, orders] : asks_)
+		askInfos.push_back(CreateLevelInfos(price, orders));
+
+	return OrderbookLevelInfos{ bidInfos, askInfos };
+}
+
+void Orderbook::prepopulateOrderBook()
+{
+	// Prepopulate the orderbook with 10 bid & 10 ask
+	for (int i = 0; i < 10; i++)
+	{
+		OrderType OrderType_ = getRandomOrderType();
+		Price Price_ = getRandomPrice(90, 100);
+		Quantity Quantitiy_ = getRandomQuantity(50, 100);
+
+		OrderPointer order = std::make_shared<Order>(OrderType_, id_cnt++, Side::Buy, Price_, Quantitiy_);
+		AddOrder(order);
+	}
+
+	for (int i = 0; i < 10; i++)
+	{
+		OrderType OrderType_ = getRandomOrderType();
+		Price Price_ = getRandomPrice(100, 110);
+		Quantity Quantitiy_ = getRandomQuantity(50, 100);
+
+		OrderPointer order = std::make_shared<Order>(OrderType_, id_cnt++, Side::Sell, Price_, Quantitiy_);
+		AddOrder(order);
+	}
+}
+
+OrderType Orderbook::getRandomOrderType()
+{
+// Prepoulate the orderbook with GoodTillCancel & GoodForDay order
+
+	static std::random_device rd;
+	static std::mt19937 gen(rd());
+	static std::uniform_int_distribution<> dis(0, 1);
+
+	switch (dis(gen))
+	{
+		case 0: return OrderType::GoodTillCancel;
+		case 1: return OrderType::GoodForDay;
+	}
+}
+
+Price Orderbook::getRandomPrice(int min, int max)
+{
+	static std::random_device rd;
+	static std::mt19937 gen(rd());
+	std::uniform_int_distribution<> dis(min, max);
+
+	return static_cast<Price>(dis(gen));
+}
+
+Quantity Orderbook::getRandomQuantity(int min, int max)
+{
+	static std::random_device rd;
+	static std::mt19937 gen(rd());
+	std::uniform_int_distribution<> dis(min, max);
+
+	return static_cast<Quantity>(dis(gen));
+}
+
+void Orderbook::printVisual() const 
+{
+	using namespace std::chrono;
+	const auto now = system_clock::now(); // Getting the current time
+	const auto now_c = system_clock::to_time_t(now); // Convert the object time to time_t
+	std::tm now_parts;
+	localtime_s(&now_parts, &now_c); // Convert time_t object to tm to enable time to be break down into years, month, etc..
+
+	std::cout << now_parts.tm_mday << '/' << now_parts.tm_mon + 1 << '/' << (now_parts.tm_year + 1900) % 2000 << "\t"
+		<< now_parts.tm_hour << ':' << now_parts.tm_min << ':' << now_parts.tm_sec << "\n\n";
+
+	auto infos = GetOrderInfos();
+
+	auto bids = infos.GetBids();
+	auto asks = infos.GetAsks();
+	size_t maxSize = std::max(bids.size(), asks.size());
+
+	std::locale::global(std::locale("en_US.UTF-8"));
+	std::wcout.imbue(std::locale());
+	std::cout << std::left;
+
+	std::cout << "============== BIDS ==============\n";
+	for (const auto& bid : bids)
+	{
+		std::string color = "32";
+		std::cout << "\033[1;" << color << "m" << "$" << std::setw(6) << bid.price_ << std::setw(5) << bid.quantity_ << "\033[0m ";
+
+		for (int i = 0; i < bid.quantity_ / 10; i++)
+			std::wcout << L"█";
+		
+		std::cout << std::endl;
+	}
+
+	std::cout << std::endl;
+	std::cout << "============== ASKS ==============\n";
+	for (const auto& ask : asks)
+	{
+		std::string color = "31";
+		std::cout << "\033[1;" << color << "m" << "$" << std::setw(6) << ask.price_ << std::setw(5) << ask.quantity_ << "\033[0m ";
+
+		for (int i = 0; i < ask.quantity_ / 10; i++)
+			std::wcout << L"█";
+
+		std::cout << std::endl;
+	}
+}
