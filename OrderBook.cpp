@@ -6,6 +6,7 @@
 #include <iostream>
 #include <locale>
 #include <iomanip>
+#include <optional>
 
 void Orderbook::PruneGoodForDayOrders()
 {
